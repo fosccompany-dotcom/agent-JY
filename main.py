@@ -64,18 +64,27 @@ def clip(s: str, n: int = 3500) -> str:
     return s if len(s) <= n else s[:n] + "\n…(truncated)"
 
 def bootstrap_repo():
-    """데이터 레포가 없으면 clone. push 가능하도록 토큰 박힌 remote 설정."""
-    if REPO_DIR.exists():
-        return "repo present"
+    """데이터 레포 확보. manifest.json 유무로 '진짜 받아졌는지' 판정.
+    폴더만 있고 비었으면(이전 실패 잔재) 지우고 다시 clone."""
+    import shutil
+    # 이미 제대로 받아져 있으면 통과
+    if (REPO_DIR / "manifest.json").exists():
+        return "repo present (manifest ok)"
     if not (GIT_REPO_URL and GITHUB_TOKEN):
         return "repo missing & no clone creds (GIT_REPO_URL/GITHUB_TOKEN)"
-    CLONE_ROOT.mkdir(parents=True, exist_ok=True)
+    # git 설치 확인
+    if shutil.which("git") is None:
+        return "git not installed (check nixpacks.toml)"
+    # 빈/불완전 폴더 잔재 제거 후 재clone
+    if REPO_DIR.exists():
+        shutil.rmtree(REPO_DIR, ignore_errors=True)
+    REPO_DIR.parent.mkdir(parents=True, exist_ok=True)
     url = GIT_REPO_URL.replace("https://", f"https://x-access-token:{GITHUB_TOKEN}@")
-    dest = CLONE_ROOT / Path(GIT_REPO_URL.rstrip("/").split("/")[-1]).stem
-    out = _sh(["git", "clone", url, str(dest)])
-    _sh(["git", "config", "user.name", "hermes"], cwd=str(dest))
-    _sh(["git", "config", "user.email", "hermes@local"], cwd=str(dest))
-    return f"cloned: {out}"
+    out = _sh(["git", "clone", url, str(REPO_DIR)])
+    _sh(["git", "config", "user.name", "hermes"], cwd=str(REPO_DIR))
+    _sh(["git", "config", "user.email", "hermes@local"], cwd=str(REPO_DIR))
+    ok = (REPO_DIR / "manifest.json").exists()
+    return f"cloned ({'manifest ok' if ok else 'still no manifest'}): {out}"
 
 # ---------- command handlers (NO model) ----------
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
