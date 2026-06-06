@@ -1,2 +1,3 @@
 [phases.setup]
-nixPkgs = ["python3", "git"]
+nixPkgs = ["...", "git"]
+aptPkgs = ["...", "git"]
