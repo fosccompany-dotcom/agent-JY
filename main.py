@@ -132,6 +132,17 @@ async def cmd_commit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     out = await sh(["git", "push"], cwd=str(REPO_DIR))
     await update.message.reply_text(clip("push:\n" + out))
 
+async def cmd_pull(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """GitHub 최신을 받아 봇 저장소를 동기화 (웹에서 바뀐 것 반영)."""
+    if not is_allowed(update): return
+    await update.message.reply_text("⬇️ GitHub 최신 받는 중…")
+    # 로컬 변경이 있으면 충돌나니, 안전하게 원격 기준으로 맞춤
+    await sh(["git", "fetch", "origin"], cwd=str(REPO_DIR))
+    out = await sh(["git", "reset", "--hard", "origin/main"], cwd=str(REPO_DIR))
+    # 동기화 후 상태 한 줄
+    head = await sh(["git", "log", "-1", "--oneline"], cwd=str(REPO_DIR))
+    await update.message.reply_text(clip(f"✅ 동기화 완료\n{out}\nHEAD: {head}"))
+
 # ---------- optional brain (OFF by default) ----------
 async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """텔레그램으로 받은 파일을 _inbox에 저장 → 자동 적재·커밋·푸시.
@@ -190,6 +201,7 @@ def main():
     app.add_handler(CommandHandler("ingest", cmd_ingest))
     app.add_handler(CommandHandler("pending", cmd_pending))
     app.add_handler(CommandHandler("commit", cmd_commit))
+    app.add_handler(CommandHandler("pull", cmd_pull))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     print("Hermes (owned) up. chat brain:", "ON" if CHAT_ENABLED else "OFF")
