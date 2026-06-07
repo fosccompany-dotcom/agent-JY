@@ -40,6 +40,7 @@ HELP = (
     "/commit  — 변경분 git push\n"
     "/id      — 이 채팅 id (ALLOWED_CHAT_ID 설정용)\n"
     "/help    — 이 도움말\n\n"
+    "📎 파일을 그냥 보내면 _inbox에 받아 자동 적재·푸시 (캡션 'work'=회사용)\n"
     f"뇌(자연어 대화): {'ON' if CHAT_ENABLED else 'OFF (토큰 절약)'}"
 )
 
@@ -132,6 +133,32 @@ async def cmd_commit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(clip("push:\n" + out))
 
 # ---------- optional brain (OFF by default) ----------
+async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """텔레그램으로 받은 파일을 _inbox에 저장 → 자동 적재·커밋·푸시.
+    캡션에 'work' 포함 시 work 폴더, 아니면 personal."""
+    if not is_allowed(update): return
+    doc = update.message.document
+    if not doc:
+        return
+    caption = (update.message.caption or "").lower()
+    sub = "work" if "work" in caption else "personal"
+    inbox = REPO_DIR / "_inbox" / sub
+    inbox.mkdir(parents=True, exist_ok=True)
+    dest = inbox / doc.file_name
+    await update.message.reply_text(f"📥 받음: {doc.file_name} → _inbox/{sub}\n적재 시작…")
+    try:
+        tg_file = await doc.get_file()
+        await tg_file.download_to_drive(custom_path=str(dest))
+    except Exception as e:
+        await update.message.reply_text(f"다운로드 실패: {e}")
+        return
+    # 자동 적재 → 커밋 → 푸시
+    out = await sh(["python", "scripts/watch_inbox.py"], cwd=str(REPO_DIR))
+    await sh(["git", "add", "-A"], cwd=str(REPO_DIR))
+    await sh(["git", "commit", "-m", f"[hermes] auto-ingest {doc.file_name}"], cwd=str(REPO_DIR))
+    push = await sh(["git", "push"], cwd=str(REPO_DIR))
+    await update.message.reply_text(clip(f"✅ 적재+푸시 완료\n{out}\npush: {push}"))
+
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update): return
     if not (CHAT_ENABLED and ANTHROPIC_API_KEY):
@@ -163,6 +190,7 @@ def main():
     app.add_handler(CommandHandler("ingest", cmd_ingest))
     app.add_handler(CommandHandler("pending", cmd_pending))
     app.add_handler(CommandHandler("commit", cmd_commit))
+    app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     print("Hermes (owned) up. chat brain:", "ON" if CHAT_ENABLED else "OFF")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
