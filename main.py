@@ -15,12 +15,15 @@ ENV (Railway Variables):
   ANTHROPIC_MODEL      기본 claude-haiku-4-5-20251001 (가장 저렴, env로 교체 가능)
 """
 import os, json, asyncio, subprocess, html
+import datetime as dt
 from pathlib import Path
 
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import (Application, CommandHandler, MessageHandler,
                           filters, ContextTypes)
+
+import briefing  # work-wiki 일정 스캔 (모델 0)
 
 TOKEN          = os.environ["TELEGRAM_BOT_TOKEN"]
 ALLOWED_CHAT_ID = os.environ.get("ALLOWED_CHAT_ID", "").strip()
@@ -31,16 +34,25 @@ REPO_DIR       = Path(os.environ.get("REPO_DIR", str(CLONE_ROOT / "Agent-vivian"
 CHAT_ENABLED   = os.environ.get("CHAT_ENABLED", "false").lower() == "true"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
 ANTHROPIC_MODEL   = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")  # 균형. env로 교체 가능
+# 자동 브리핑/알람 설정
+DAILY_BRIEF_HOUR = int(os.environ.get("DAILY_BRIEF_HOUR", "8"))   # KST 아침 시각 (기본 08시)
+ALERT_HOUR       = int(os.environ.get("ALERT_HOUR", "20"))        # 임박 개별알람 시각 (기본 20시)
+BRIEF_HORIZON    = int(os.environ.get("BRIEF_HORIZON", "14"))     # 브리핑에 보여줄 일수
+KST              = dt.timezone(dt.timedelta(hours=9))
 
 HELP = (
     "<b>Hermes 명령</b> (모델 호출 0, 무료)\n"
+    "/today   — 오늘+임박 일정 브리핑 (전 영역)\n"
+    "/cal     — 다가오는 2주 캘린더\n"
     "/status  — 저장소 적재 현황 (manifest 요약)\n"
     "/ingest  — _inbox 처리 → L3 적재 → 커밋\n"
     "/pending — 판단 대기 항목 (needs_claude)\n"
+    "/pull    — GitHub 최신 동기화\n"
     "/commit  — 변경분 git push\n"
     "/id      — 이 채팅 id (ALLOWED_CHAT_ID 설정용)\n"
     "/help    — 이 도움말\n\n"
     "📎 파일을 그냥 보내면 _inbox에 받아 자동 적재·푸시 (캡션 'work'=회사용)\n"
+    f"⏰ 매일 {DAILY_BRIEF_HOUR:02d}시 아침 브리핑 · {ALERT_HOUR:02d}시 임박 알람 (자동)\n"
     f"뇌(자연어 대화): {'ON' if CHAT_ENABLED else 'OFF (토큰 절약)'}"
 )
 
@@ -143,6 +155,55 @@ async def cmd_pull(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     head = await sh(["git", "log", "-1", "--oneline"], cwd=str(REPO_DIR))
     await update.message.reply_text(clip(f"✅ 동기화 완료\n{out}\nHEAD: {head}"))
 
+# ---------- 일정 브리핑 (work-wiki 스캔, 모델 0) ----------
+async def _sync_repo():
+    """브리핑 전 최신 반영 (웹/Claude에서 바뀐 work-wiki를 받음)."""
+    await sh(["git", "fetch", "origin"], cwd=str(REPO_DIR))
+    await sh(["git", "reset", "--hard", "origin/main"], cwd=str(REPO_DIR))
+
+async def cmd_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update): return
+    await _sync_repo()
+    try:
+        msg = await asyncio.to_thread(briefing.build_briefing, str(REPO_DIR), BRIEF_HORIZON)
+    except Exception as e:
+        msg = f"브리핑 생성 실패: {e}"
+    await update.message.reply_text(clip(msg), parse_mode=ParseMode.HTML)
+
+async def cmd_cal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update): return
+    await _sync_repo()
+    try:
+        msg = await asyncio.to_thread(briefing.build_briefing, str(REPO_DIR), 14)
+    except Exception as e:
+        msg = f"캘린더 생성 실패: {e}"
+    await update.message.reply_text(clip(msg), parse_mode=ParseMode.HTML)
+
+async def job_morning_brief(ctx: ContextTypes.DEFAULT_TYPE):
+    """매일 아침 자동 브리핑 → ALLOWED_CHAT_ID로 push."""
+    if not ALLOWED_CHAT_ID:
+        return
+    await _sync_repo()
+    try:
+        msg = await asyncio.to_thread(briefing.build_briefing, str(REPO_DIR), BRIEF_HORIZON)
+    except Exception as e:
+        msg = f"아침 브리핑 실패: {e}"
+    await ctx.bot.send_message(chat_id=int(ALLOWED_CHAT_ID), text=clip(msg),
+                               parse_mode=ParseMode.HTML)
+
+async def job_due_alert(ctx: ContextTypes.DEFAULT_TYPE):
+    """임박(D-DAY/D-1) 있을 때만 개별 알람 push."""
+    if not ALLOWED_CHAT_ID:
+        return
+    await _sync_repo()
+    try:
+        msg = await asyncio.to_thread(briefing.build_alert, str(REPO_DIR))
+    except Exception:
+        msg = None
+    if msg:
+        await ctx.bot.send_message(chat_id=int(ALLOWED_CHAT_ID), text=clip(msg),
+                                   parse_mode=ParseMode.HTML)
+
 # ---------- optional brain (OFF by default) ----------
 async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """텔레그램으로 받은 파일을 _inbox에 저장 → 자동 적재·커밋·푸시.
@@ -197,6 +258,8 @@ def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler(["start", "help"], cmd_start))
     app.add_handler(CommandHandler("id", cmd_id))
+    app.add_handler(CommandHandler("today", cmd_today))
+    app.add_handler(CommandHandler("cal", cmd_cal))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("ingest", cmd_ingest))
     app.add_handler(CommandHandler("pending", cmd_pending))
@@ -204,6 +267,16 @@ def main():
     app.add_handler(CommandHandler("pull", cmd_pull))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+
+    # 매일 자동 브리핑/알람 (KST 기준). JobQueue가 있을 때만.
+    jq = app.job_queue
+    if jq is not None and ALLOWED_CHAT_ID:
+        jq.run_daily(job_morning_brief, time=dt.time(hour=DAILY_BRIEF_HOUR, minute=0, tzinfo=KST))
+        jq.run_daily(job_due_alert, time=dt.time(hour=ALERT_HOUR, minute=0, tzinfo=KST))
+        print(f"scheduled: morning {DAILY_BRIEF_HOUR:02d}:00 KST, alert {ALERT_HOUR:02d}:00 KST")
+    else:
+        print("JobQueue 비활성 (ALLOWED_CHAT_ID 없거나 job-queue extra 미설치) — 자동 브리핑 OFF, /today는 작동")
+
     print("Hermes (owned) up. chat brain:", "ON" if CHAT_ENABLED else "OFF")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
