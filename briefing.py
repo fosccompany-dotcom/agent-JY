@@ -120,12 +120,35 @@ def _dday(today: _dt.date, d: _dt.date) -> str:
 
 
 def build_briefing(repo_dir: str, days: int = 14) -> str:
-    """아침 브리핑 / /today / /cal 공용 HTML."""
+    """아침 브리핑 / /today / /cal 공용 HTML. work-wiki 게이트 + 외부 캘린더 합침."""
     today, rows, overdue = collect(repo_dir, days)
-    wd = ["월", "화", "수", "목", "금", "토", "일"][today.weekday()]
-    out = [f"<b>📅 {today.strftime('%Y-%m-%d')} ({wd}) 브리핑</b>"]
 
-    # 지난 마감 (놓친 것)
+    # 외부 캘린더(구글/네이버/Dooray) 이벤트 합치기 (실패해도 무시)
+    cal_events = []
+    try:
+        import calendars
+        cal_events = calendars.fetch_events(today, days)
+    except Exception:
+        cal_events = []
+    # 캘린더 이벤트를 rows와 같은 형식으로 변환해 합침
+    for e in cal_events:
+        item = {"date": e["date"], "kind": "일정", "area": e["label"],
+                "area_title": e["label"], "title": e["title"],
+                "note": e.get("location", ""), "track": "",
+                "time": e.get("time")}
+        if e["date"] == today:
+            rows.append(item)
+        elif e["date"] > today:
+            rows.append(item)
+        # 과거 캘린더 일정은 표시 안 함 (이미 지난 약속)
+    rows.sort(key=lambda r: (r["date"], r.get("time") or "00:00"))
+
+    wd = ["월", "화", "수", "목", "금", "토", "일"][today.weekday()]
+    src_note = "work-wiki" + (" + 캘린더" if cal_events else "")
+    out = [f"<b>📅 {today.strftime('%Y-%m-%d')} ({wd}) 브리핑</b>",
+           f"<i>{src_note}</i>"]
+
+    # 지난 마감 (놓친 것 — work-wiki 게이트/할일만)
     if overdue:
         out.append("\n<b>⚠️ 지난 마감</b>")
         for r in overdue[:8]:
@@ -137,7 +160,8 @@ def build_briefing(repo_dir: str, days: int = 14) -> str:
     if todays:
         out.append("\n<b>🔥 오늘</b>")
         for r in todays:
-            out.append(f"• [{r['area']}] {r['title']}")
+            t = f"{r.get('time')} " if r.get("time") else ""
+            out.append(f"• {t}[{r['area']}] {r['title']}")
 
     # 임박 (D+1 ~ horizon)
     soon = [r for r in rows if r["date"] > today]
@@ -149,20 +173,34 @@ def build_briefing(repo_dir: str, days: int = 14) -> str:
                 cur = r["date"]
                 swd = ["월","화","수","목","금","토","일"][cur.weekday()]
                 out.append(f"\n<u>{cur.strftime('%m/%d')}({swd}) {_dday(today, cur)}</u>")
-            kind_icon = "🎯" if r["kind"] == "게이트" else "▫️"
-            out.append(f"{kind_icon} [{r['area']}] {r['title']}")
+            if r["kind"] == "게이트":
+                icon = "🎯"
+            elif r["kind"] == "일정":
+                icon = "📌"
+            else:
+                icon = "▫️"
+            t = f"{r.get('time')} " if r.get("time") else ""
+            out.append(f"{icon} {t}[{r['area']}] {r['title']}")
 
     if not (overdue or todays or soon):
-        out.append("\n예정된 게이트·마감이 없습니다. (날짜 미정 항목은 제외)")
+        out.append("\n예정된 일정·게이트·마감이 없습니다.")
 
-    out.append("\n—\n블록(🚩)·지난마감은 우선 확인. 자세히: 영역명으로 물어보세요.")
+    out.append("\n—\n🎯게이트 📌캘린더 ▫️할일 🚩블록. 자세히: 영역명으로 물어보세요.")
     return "\n".join(out)
 
 
 def due_alerts(repo_dir: str):
-    """개별 알람용: 오늘(D-DAY)·내일(D-1) 항목만 추려서 반환 (리스트)."""
+    """개별 알람용: 오늘(D-DAY)·내일(D-1) 항목만 추려서 반환 (리스트). 캘린더 포함."""
     today, rows, _ = collect(repo_dir, days=2)
+    try:
+        import calendars
+        for e in calendars.fetch_events(today, 2):
+            rows.append({"date": e["date"], "kind": "일정", "area": e["label"],
+                         "title": e["title"], "time": e.get("time")})
+    except Exception:
+        pass
     hot = [r for r in rows if 0 <= (r["date"] - today).days <= 1]
+    hot.sort(key=lambda r: (r["date"], r.get("time") or "00:00"))
     return today, hot
 
 
@@ -173,7 +211,8 @@ def build_alert(repo_dir: str) -> str | None:
         return None
     lines = ["<b>🔔 임박 알람</b>"]
     for r in hot:
-        lines.append(f"• <code>{_dday(today, r['date'])}</code> [{r['area']}] {r['title']}")
+        t = f"{r.get('time')} " if r.get("time") else ""
+        lines.append(f"• <code>{_dday(today, r['date'])}</code> {t}[{r['area']}] {r['title']}")
     return "\n".join(lines)
 
 
